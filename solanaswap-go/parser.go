@@ -12,6 +12,7 @@ import (
 
 type Parser struct {
 	tx              *rpc.GetTransactionResult
+	txMeta          *rpc.TransactionMeta
 	txInfo          *solana.Transaction
 	allAccountKeys  solana.PublicKeySlice
 	splTokenInfoMap map[string]TokenInfo // map[authority]TokenInfo
@@ -19,7 +20,7 @@ type Parser struct {
 	Log             *logrus.Logger
 }
 
-func NewTransactionParser(tx *rpc.GetTransactionResult) (*Parser, error) {
+func NewTransactionParserFromResult(tx *rpc.GetTransactionResult) (*Parser, error) {
 
 	txInfo, err := tx.Transaction.GetTransaction()
 	if err != nil {
@@ -36,8 +37,41 @@ func NewTransactionParser(tx *rpc.GetTransactionResult) (*Parser, error) {
 	})
 
 	parser := &Parser{
-		tx:             tx,
 		txInfo:         txInfo,
+		txMeta:         tx.Meta,
+		allAccountKeys: allAccountKeys,
+		Log:            log,
+	}
+
+	if err := parser.extractSPLTokenInfo(); err != nil {
+		return nil, fmt.Errorf("failed to extract SPL Token Addresses: %w", err)
+	}
+
+	if err := parser.extractSPLDecimals(); err != nil {
+		return nil, fmt.Errorf("failed to extract SPL decimals: %w", err)
+	}
+
+	return parser, nil
+}
+
+func NewTransactionWithMetaParser(tx *rpc.TransactionWithMeta) (*Parser, error) {
+	txInfo, err := tx.GetTransaction()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get transaction: %w", err)
+	}
+
+	allAccountKeys := append(txInfo.Message.AccountKeys, tx.Meta.LoadedAddresses.Writable...)
+	allAccountKeys = append(allAccountKeys, tx.Meta.LoadedAddresses.ReadOnly...)
+
+	log := logrus.New()
+	log.SetFormatter(&logrus.TextFormatter{
+		TimestampFormat: "2006-01-02 15:04:05",
+		FullTimestamp:   true,
+	})
+
+	parser := &Parser{
+		txInfo:         txInfo,
+		txMeta:         tx.Meta,
 		allAccountKeys: allAccountKeys,
 		Log:            log,
 	}
@@ -123,15 +157,9 @@ type SwapInfo struct {
 }
 
 func (p *Parser) ProcessSwapData(swapDatas []SwapData) (*SwapInfo, error) {
-
-	txInfo, err := p.tx.Transaction.GetTransaction()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get transaction: %w", err)
-	}
-
 	swapInfo := &SwapInfo{
-		Signers:    txInfo.Message.Signers(),
-		Signatures: txInfo.Signatures,
+		Signers:    p.txInfo.Message.Signers(),
+		Signatures: p.txInfo.Signatures,
 		// TODO: add timestamp (get from block)
 	}
 
@@ -304,11 +332,11 @@ func (p *Parser) processTradingBotSwaps(instructionIndex int) []SwapData {
 
 // helper function to get inner instructions for a given instruction index
 func (p *Parser) getInnerInstructions(index int) []solana.CompiledInstruction {
-	if p.tx.Meta == nil || p.tx.Meta.InnerInstructions == nil {
+	if p.txMeta == nil || p.txMeta.InnerInstructions == nil {
 		return nil
 	}
 
-	for _, inner := range p.tx.Meta.InnerInstructions {
+	for _, inner := range p.txMeta.InnerInstructions {
 		if inner.Index == uint16(index) {
 			return inner.Instructions
 		}
